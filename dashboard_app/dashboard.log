@@ -1,0 +1,21 @@
+2026-02-23 09:07:11,553 - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://127.0.0.1:5000
+2026-02-23 09:07:11,553 - INFO - [33mPress CTRL+C to quit[0m
+2026-02-23 09:07:11,565 - INFO -  * Restarting with watchdog (windowsapi)
+2026-02-23 09:07:11,814 - WARNING -  * Debugger is active!
+2026-02-23 09:07:11,817 - INFO -  * Debugger PIN: 725-272-387
+2026-02-23 09:07:30,220 - INFO - 127.0.0.1 - - [23/Feb/2026 09:07:30] "[32mGET / HTTP/1.1[0m" 302 -
+2026-02-23 09:07:30,496 - INFO - 127.0.0.1 - - [23/Feb/2026 09:07:30] "GET /login HTTP/1.1" 200 -
+2026-02-23 09:07:30,660 - INFO - 127.0.0.1 - - [23/Feb/2026 09:07:30] "GET /static/styles.css HTTP/1.1" 200 -
+2026-02-23 09:07:30,899 - INFO - 127.0.0.1 - - [23/Feb/2026 09:07:30] "GET /static/app.js HTTP/1.1" 200 -
+2026-02-23 09:07:31,377 - INFO - 127.0.0.1 - - [23/Feb/2026 09:07:31] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+2026-02-23 09:07:47,753 - INFO - User admin logged in
+2026-02-23 09:07:47,754 - INFO - 127.0.0.1 - - [23/Feb/2026 09:07:47] "[32mPOST /login HTTP/1.1[0m" 302 -
+2026-02-23 09:07:48,093 - INFO - 127.0.0.1 - - [23/Feb/2026 09:07:48] "GET /dashboard HTTP/1.1" 200 -
+2026-02-23 09:07:48,340 - INFO - 127.0.0.1 - - [23/Feb/2026 09:07:48] "[36mGET /static/styles.css HTTP/1.1[0m" 304 -
+2026-02-23 09:07:48,438 - INFO - 127.0.0.1 - - [23/Feb/2026 09:07:48] "[36mGET /static/app.js HTTP/1.1[0m" 304 -
+2026-02-23 09:09:23,849 - INFO - 127.0.0.1 - - [23/Feb/2026 09:09:23] "GET /dashboard?file=ex.xlsx&status=success HTTP/1.1" 200 -
+2026-02-23 09:09:24,114 - INFO - 127.0.0.1 - - [23/Feb/2026 09:09:24] "[36mGET /static/styles.css HTTP/1.1[0m" 304 -
+2026-02-23 09:09:24,193 - INFO - 127.0.0.1 - - [23/Feb/2026 09:09:24] "[36mGET /static/app.js HTTP/1.1[0m" 304 -
+2026-02-23 09:14:21,906 - INFO -  * Detected change in 'D:\\12\\test-excel-py\\dashboard_app\\app.py', reloading
+2026-02-23 09:14:21,944 - INFO -  * Restarting with watchdog (windowsapi)
