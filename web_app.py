@@ -1,7 +1,16 @@
-from flask import Flask, jsonify, render_template_string, request, redirect, url_for, session
+from flask import Flask, jsonify, render_template_string, request, redirect, url_for, session, send_file
 import pandas as pd
 import os
 import math
+import sqlite3
+import io
+from datetime import datetime
+import shutil
+
+try:
+    import process_export
+except ImportError:
+    process_export = None
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("DASHBOARD_SECRET_KEY", "change-this-key")
@@ -13,57 +22,184 @@ def get_data_file():
     """
     Tentukan lokasi file Excel yang akan dibaca dashboard.
     - Jika EXCEL_DASHBOARD_FILE diset, gunakan itu.
-    - Jika tidak, gunakan file default di direktori proyek: dashboard_export.xlsx
+    - Jika tidak, gunakan file default di folder export: dashboard_export.xlsx
     """
     env_path = os.environ.get(DATA_FILE_ENV)
     if env_path:
         return env_path
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base_dir, "dashboard_export.xlsx")
+    return os.path.join(base_dir, "export", "dashboard_export.xlsx")
 
 
 def load_dataframe():
-    path = get_data_file()
-    # Logging sederhana ke stdout agar mudah dicek di terminal
-    print(f"[web_app] Trying to load data from: {path}", flush=True)
-    if not os.path.isabs(path):
-        path = os.path.abspath(path)
-        print(f"[web_app] Normalized to absolute path: {path}", flush=True)
-    if not os.path.exists(path):
-        print(f"[web_app] File not found: {path}", flush=True)
-        return pd.DataFrame()
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    db_path = os.path.join(base_dir, "data_pipeline.sqlite")
+    merged_path = os.path.join(base_dir, "merged_current.xlsx")
+    
+    df = pd.DataFrame()
+    
+    if os.path.exists(db_path):
+        try:
+            print(f"[web_app] Loading from SQLite: {db_path}", flush=True)
+            conn = sqlite3.connect(db_path)
+            # Get all columns but filter out internal ones in the query if possible, 
+            # but pandas read_sql_query is easier with * and we filter later in this function.
+            # To strictly follow "hide from query", we can fetch columns first.
+            cursor = conn.execute("SELECT * FROM records_current LIMIT 0")
+            all_cols = [description[0] for description in cursor.description]
+            exclude_cols = ["row_hash", "ingest_timestamp", "source_file", "ExportSource", "ExportTimestamp", "ExportUser"]
+            select_cols = [f'"{c}"' for c in all_cols if c not in exclude_cols]
+            query = f"SELECT {', '.join(select_cols)} FROM records_current"
+            
+            df = pd.read_sql_query(query, conn)
+            conn.close()
+            if not df.empty:
+                print(f"[web_app] Loaded dataframe from DB with shape: {df.shape}", flush=True)
+                # Success from DB
+            else:
+                # DB exists but empty, try excel
+                raise ValueError("DB empty")
+        except Exception as e:
+            print(f"[web_app] DB loading skipped/failed: {e}", flush=True)
+            df = pd.DataFrame()
+            
+    if df.empty and os.path.exists(merged_path):
+        try:
+            print(f"[web_app] Loading merged snapshot: {merged_path}", flush=True)
+            excel_obj = pd.read_excel(merged_path, sheet_name=None)
+            if isinstance(excel_obj, dict):
+                df = excel_obj.get("Data", next(iter(excel_obj.values())))
+            else:
+                df = excel_obj
+            print(f"[web_app] Loaded dataframe from merged snapshot with shape: {df.shape}", flush=True)
+        except Exception as e:
+            print(f"[web_app] Error reading merged snapshot: {e}", flush=True)
+            
+    if df.empty:
+        path = get_data_file()
+        print(f"[web_app] Fallback loading from: {path}", flush=True)
+        if not os.path.isabs(path):
+            path = os.path.abspath(path)
+        if os.path.exists(path):
+            try:
+                excel_obj = pd.read_excel(path, sheet_name=None)
+                if isinstance(excel_obj, dict):
+                    df = excel_obj.get("Data", next(iter(excel_obj.values())))
+                else:
+                    df = excel_obj
+                print(f"[web_app] Loaded dataframe with shape: {df.shape}", flush=True)
+            except Exception as e:
+                print(f"[web_app] Error reading Excel file: {e}", flush=True)
+
+    if not df.empty:
+        # 1. Clean up "REVENUE (ACTUAL)" column - REMOVE PERMANENTLY
+        if "REVENUE (ACTUAL)" in df.columns:
+            print("[web_app] Removing 'REVENUE (ACTUAL)' column from dataframe", flush=True)
+            df = df.drop(columns=["REVENUE (ACTUAL)"])
+
+        # 2. Rename column "REVENUE INCREMENTAL 1" to "INCREMENTAL 1" if exists
+        if "REVENUE INCREMENTAL 1" in df.columns:
+            print("[web_app] Found 'REVENUE INCREMENTAL 1', renaming to 'INCREMENTAL 1'", flush=True)
+            if "INCREMENTAL 1" in df.columns:
+                df["INCREMENTAL 1"] = df["INCREMENTAL 1"].fillna(df["REVENUE INCREMENTAL 1"])
+                df = df.drop(columns=["REVENUE INCREMENTAL 1"])
+            else:
+                df = df.rename(columns={"REVENUE INCREMENTAL 1": "INCREMENTAL 1"})
+        
+        # 3. Reorder and Filter Columns
+        desired_order = [
+            "NOP", "PROGRAM", "KATEGORI", "JUSTIFIKASI", "PROPOSAL", "BUDGET", 
+            "REVENUE", "COST", "PROFIT", "INCREMENTAL 1", "INCREMENTAL 2", 
+            "INCREMENTAL 3", "STATUS", "PILOT", "DRIVEN PROGRAM", "ASSIGN BY", 
+            "APPROVED BY"
+        ]
+        
+        # Internal columns to hide from UI and Exports
+        exclude_cols = ["row_hash", "ingest_timestamp", "source_file", "ExportSource", "ExportTimestamp", "ExportUser"]
+        
+        cols_to_use = [c for c in desired_order if c in df.columns]
+        # Any other columns that are not internal
+        other_cols = [c for c in df.columns if c not in cols_to_use and c not in exclude_cols]
+        df = df[cols_to_use + other_cols]
+        
+    return df
+
+
+def merge_to_dashboard_excel_web(df_new, user_id: str):
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    export_dir = os.path.join(base_dir, "export")
+    backup_dir = os.path.join(export_dir, "backup")
+    
+    # Ensure target directories exist
+    os.makedirs(backup_dir, exist_ok=True)
+    
+    dashboard_path = os.path.join(export_dir, "dashboard_export.xlsx")
+    
+    if df_new is None or df_new.empty:
+        print("[web_app] merge_to_dashboard_excel_web: no data to merge", flush=True)
+        return dashboard_path, None
+        
+    df_new = df_new.copy()
+    ts = datetime.utcnow().isoformat()
+    
+    # SYNC ENGINE INTEGRATION
+    sync_results = None
+    if process_export is not None:
+        try:
+            conn = process_export.connect_db()
+            # Ensure schema is up to date
+            process_export.ensure_schema(conn, list(df_new.columns))
+            
+            # Perform field-level synchronization
+            sync_results = process_export.detect_and_sync_changes(conn, df_new, source_file=f"web_export_{user_id}")
+            conn.close()
+            
+            if sync_results["modifications"]:
+                print(f"[web_app] SYNC: {len(sync_results['modifications'])} modifications detected.", flush=True)
+        except Exception as e:
+            print(f"[web_app] Sync Engine failed: {e}", flush=True)
+
+    # Update the physical Excel file for dashboard fallback
+    if os.path.exists(dashboard_path):
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        backup_filename = f"dashboard_export_backup_{timestamp}.xlsx"
+        backup_path = os.path.join(backup_dir, backup_filename)
+        
+        try:
+            shutil.copy2(dashboard_path, backup_path)
+            print(f"[web_app] Backup created: {backup_path}", flush=True)
+        except Exception as e:
+            print(f"[web_app] Error creating backup: {e}", flush=True)
+            
+        try:
+            # Load latest data from DB if sync was successful, otherwise fallback to Excel merge
+            if sync_results:
+                conn = process_export.connect_db()
+                combined = process_export.load_current(conn)
+                conn.close()
+            else:
+                excel_obj = pd.read_excel(dashboard_path, sheet_name=None)
+                df_old = excel_obj.get("Data", next(iter(excel_obj.values()))) if isinstance(excel_obj, dict) else excel_obj
+                combined = pd.concat([df_old, df_new], ignore_index=True).drop_duplicates(subset=["NOP"], keep="last")
+        except Exception as e:
+            print(f"[web_app] Error reading existing file: {e}", flush=True)
+            combined = df_new
+    else:
+        combined = df_new
+        
     try:
-        # Coba baca semua sheet, lalu pilih sheet "Data" jika ada
-        excel_obj = pd.read_excel(path, sheet_name=None)
-        if isinstance(excel_obj, dict):
-            if "Data" in excel_obj:
-                df = excel_obj["Data"]
-            else:
-                # Ambil sheet pertama jika nama "Data" tidak ada
-                first_key = next(iter(excel_obj.keys()))
-                df = excel_obj[first_key]
-        else:
-            df = excel_obj
-        print(f"[web_app] Loaded dataframe with shape: {df.shape}", flush=True)
-        return df
+        # Hide internal columns from the physical file on disk too
+        exclude_cols = ["row_hash", "ingest_timestamp", "source_file", "ExportSource", "ExportTimestamp", "ExportUser"]
+        df_disk = combined.drop(columns=[c for c in exclude_cols if c in combined.columns])
+        
+        with pd.ExcelWriter(dashboard_path, engine="openpyxl") as writer:
+            df_disk.to_excel(writer, index=False, sheet_name="Data")
+        
+        print(f"[web_app] Dashboard export updated: {dashboard_path}", flush=True)
     except Exception as e:
-        print(f"[web_app] Error reading Excel file: {e}", flush=True)
-        return pd.DataFrame()
-
-
-def dataframe_to_json_rows(df: pd.DataFrame):
-    records = []
-    for rec in df.to_dict(orient="records"):
-        new_rec = {}
-        for key, value in rec.items():
-            if value is None:
-                new_rec[key] = None
-            elif isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
-                new_rec[key] = None
-            else:
-                new_rec[key] = value
-        records.append(new_rec)
-    return records
+        print(f"[web_app] Error saving file: {e}", flush=True)
+        
+    return dashboard_path, sync_results
 
 
 def login_required(view):
@@ -74,6 +210,65 @@ def login_required(view):
 
     wrapped.__name__ = view.__name__
     return wrapped
+
+
+def can_export():
+    user = session.get("username")
+    allowed = os.environ.get("EXPORT_ALLOWED_USERS", "admin")
+    allowed_list = [x.strip() for x in allowed.split(",") if x.strip()]
+    return user in allowed_list
+
+
+@app.route("/api/sync/rollback", methods=["POST"])
+@login_required
+def rollback_sync():
+    if not can_export():
+        return jsonify({"error": "Not allowed"}), 403
+        
+    data = request.json
+    nop = data.get("nop")
+    if not nop:
+        return jsonify({"error": "NOP is required"}), 400
+        
+    if process_export is None:
+        return jsonify({"error": "Sync engine not available"}), 500
+        
+    try:
+        conn = process_export.connect_db()
+        success = process_export.rollback_record(conn, str(nop))
+        conn.close()
+        
+        if success:
+            # Also update the merged Excel snapshot
+            conn = process_export.connect_db()
+            out_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "export", "dashboard_export.xlsx")
+            process_export.export_merged_snapshot(conn, out_file)
+            conn.close()
+            return jsonify({"message": f"Rollback successful for NOP: {nop}"}), 200
+        else:
+            return jsonify({"error": f"No rollback data found for NOP: {nop}"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+def dataframe_to_json_rows(df: pd.DataFrame):
+    # Columns to exclude from JSON output
+    exclude_cols = ["row_hash", "ingest_timestamp", "source_file", "ExportSource", "ExportTimestamp", "ExportUser"]
+    
+    records = []
+    for rec in df.to_dict(orient="records"):
+        new_rec = {}
+        for key, value in rec.items():
+            if key in exclude_cols:
+                continue
+            if value is None:
+                new_rec[key] = None
+            elif isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+                new_rec[key] = None
+            else:
+                new_rec[key] = value
+        records.append(new_rec)
+    return records
 
 
 LOGIN_TEMPLATE = """
@@ -490,6 +685,40 @@ DASHBOARD_TEMPLATE = """
         .btn-outline:hover {
             background: rgba(15,23,42,0.98);
         }
+        .btn-danger {
+            background: var(--danger);
+            color: white;
+            padding: 6px 10px;
+            font-size: 0.75rem;
+        }
+        .btn-danger:hover:not(:disabled) {
+            filter: brightness(1.1);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(249, 115, 115, 0.4);
+        }
+        .btn-danger:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            filter: grayscale(1);
+        }
+        .clear-sort-btn {
+            background: #4b5563;
+            color: white;
+            border: none;
+            border-radius: 3px;
+            padding: 2px 6px;
+            font-size: 0.7rem;
+            cursor: pointer;
+            margin-left: 6px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s;
+            vertical-align: middle;
+        }
+        .clear-sort-btn:hover {
+            background: #374151;
+        }
         .btn-row {
             display: flex;
             flex-wrap: wrap;
@@ -580,6 +809,106 @@ DASHBOARD_TEMPLATE = """
         .footer span {
             opacity: 0.8;
         }
+        .toast {
+            position: fixed;
+            right: 20px;
+            bottom: 20px;
+            background: rgba(15,23,42,0.96);
+            border-radius: 999px;
+            padding: 8px 14px;
+            font-size: 0.78rem;
+            border: 1px solid rgba(56,189,248,0.7);
+            color: #e5e7eb;
+            opacity: 0;
+            pointer-events: none;
+            transform: translateY(10px);
+            transition: opacity var(--transition-fast), transform var(--transition-fast);
+            z-index: 50;
+        }
+        .toast.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+        .toast.error {
+            border-color: #f97373;
+            color: #fecaca;
+        }
+
+        /* Modal Styles */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.75);
+            backdrop-filter: blur(4px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s ease;
+        }
+        .modal-overlay.open {
+            opacity: 1;
+            pointer-events: auto;
+        }
+        .modal {
+            background: #0f172a;
+            border: 1px solid var(--border-subtle);
+            border-radius: 18px;
+            padding: 24px;
+            max-width: 400px;
+            width: 90%;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            transform: scale(0.95);
+            transition: transform 0.2s ease;
+        }
+        .modal-overlay.open .modal {
+            transform: scale(1);
+        }
+        .modal-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 12px;
+            color: var(--text);
+        }
+        .modal-body {
+            font-size: 0.9rem;
+            color: var(--muted);
+            margin-bottom: 24px;
+            line-height: 1.5;
+        }
+        .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+        }
+        .btn-loading {
+            position: relative;
+            color: transparent !important;
+            pointer-events: none;
+        }
+        .btn-loading::after {
+            content: "";
+            position: absolute;
+            width: 16px;
+            height: 16px;
+            top: 50%;
+            left: 50%;
+            margin-top: -8px;
+            margin-left: -8px;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 0.6s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
         @media (max-width: 1023px) {
             .layout {
                 grid-template-columns: 1fr;
@@ -657,7 +986,13 @@ DASHBOARD_TEMPLATE = """
                                 <div class="card-title">Tabel Data</div>
                                 <div class="card-subtitle">Sorting dan filtering interaktif</div>
                             </div>
-                            <div class="badge" id="rowCountBadge">0 baris</div>
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <button class="btn btn-danger" id="resetDataBtn" title="Hapus semua data">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+                                    Reset Data
+                                </button>
+                                <div class="badge" id="rowCountBadge">0 baris</div>
+                            </div>
                         </div>
                         <div class="controls-row">
                             <div class="control-group">
@@ -688,7 +1023,13 @@ DASHBOARD_TEMPLATE = """
                         </div>
                         <div class="status-bar">
                             <div id="statusText">Menunggu data...</div>
-                            <div class="status-badge" id="sortStatus"></div>
+                            <div class="status-badge" id="sortStatusContainer">
+                                <span id="sortStatus"></span>
+                                <button class="clear-sort-btn" id="clearSortBtn" style="display: none;" title="Clear sorting">X</button>
+                            </div>
+                        </div>
+                        <div class="btn-row" style="margin-top: 8px; justify-content: flex-end;">
+                            <button class="btn btn-outline" id="exportExcelBtn">Export Data</button>
                         </div>
                     </section>
                     <section class="card">
@@ -733,6 +1074,19 @@ DASHBOARD_TEMPLATE = """
             <span id="footerInfo"></span>
         </footer>
     </div>
+
+    <!-- Confirmation Modal -->
+    <div id="confirmModal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal-title">Konfirmasi Reset Data</div>
+            <div class="modal-body">Apakah anda yakin untuk mereset data ini?</div>
+            <div class="modal-actions">
+                <button class="btn btn-ghost" id="cancelResetBtn">Tidak</button>
+                <button class="btn btn-danger" id="confirmResetBtn">Ya</button>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -754,6 +1108,7 @@ DASHBOARD_TEMPLATE = """
 
         function fetchData() {
             const statusText = document.getElementById("statusText");
+            const resetBtn = document.getElementById("resetDataBtn");
             statusText.textContent = "Memuat data dari server...";
             fetch("/api/data")
                 .then(function (response) {
@@ -766,6 +1121,12 @@ DASHBOARD_TEMPLATE = """
                     columns = data.columns || [];
                     originalData = data.rows || [];
                     filteredData = originalData.slice();
+                    
+                    // Update reset button state
+                    if (resetBtn) {
+                        resetBtn.disabled = originalData.length === 0;
+                    }
+                    
                     buildTable();
                     initControls();
                     updateFooter();
@@ -775,6 +1136,7 @@ DASHBOARD_TEMPLATE = """
                     statusText.textContent = "Gagal memuat data dari server. Periksa log server Flask.";
                     const badge = document.getElementById("rowCountBadge");
                     badge.textContent = "0 baris (error)";
+                    if (resetBtn) resetBtn.disabled = true;
                 });
         }
 
@@ -847,9 +1209,61 @@ DASHBOARD_TEMPLATE = """
             });
             thElement.classList.add(currentSortDirection === "asc" ? "sort-asc" : "sort-desc");
             const sortStatus = document.getElementById("sortStatus");
+            const clearSortBtn = document.getElementById("clearSortBtn");
             sortStatus.textContent = "Sort: " + column + " (" + currentSortDirection + ")";
+            if (clearSortBtn) clearSortBtn.style.display = "inline-flex";
             renderRows();
             renderChart();
+        }
+
+        function clearSort() {
+            currentSortColumn = null;
+            currentSortDirection = "asc";
+            document.querySelectorAll("#dataTable th").forEach(function (th) {
+                th.classList.remove("sort-asc");
+                th.classList.remove("sort-desc");
+            });
+            const sortStatus = document.getElementById("sortStatus");
+            const clearSortBtn = document.getElementById("clearSortBtn");
+            if (sortStatus) sortStatus.textContent = "";
+            if (clearSortBtn) clearSortBtn.style.display = "none";
+            
+            // Re-apply filter to restore original order
+            applyGlobalFilter();
+        }
+
+        function openModal() {
+            document.getElementById("confirmModal").classList.add("open");
+        }
+
+        function closeModal() {
+            document.getElementById("confirmModal").classList.remove("open");
+        }
+
+        async function resetData() {
+            const confirmBtn = document.getElementById("confirmResetBtn");
+            const cancelBtn = document.getElementById("cancelResetBtn");
+            const resetBtn = document.getElementById("resetDataBtn");
+            
+            // Start loading state
+            confirmBtn.classList.add("btn-loading");
+            cancelBtn.disabled = true;
+            
+            try {
+                const response = await fetch("/api/data/reset", { method: "POST" });
+                if (!response.ok) throw new Error("Gagal mereset data");
+                
+                closeModal();
+                showToast("Data berhasil direset", false);
+                fetchData(); // Refresh UI
+            } catch (error) {
+                console.error("Reset error:", error);
+                showToast("Gagal mereset data: " + error.message, true);
+            } finally {
+                // End loading state
+                confirmBtn.classList.remove("btn-loading");
+                cancelBtn.disabled = false;
+            }
         }
 
         function initControls() {
@@ -896,6 +1310,26 @@ DASHBOARD_TEMPLATE = """
             ySelect.addEventListener("change", renderChart);
             document.getElementById("downloadPdfBtn").addEventListener("click", downloadPdf);
             document.getElementById("resetViewBtn").addEventListener("click", resetView);
+            const resetDataBtn = document.getElementById("resetDataBtn");
+            if (resetDataBtn) {
+                resetDataBtn.addEventListener("click", openModal);
+            }
+            const confirmResetBtn = document.getElementById("confirmResetBtn");
+            if (confirmResetBtn) {
+                confirmResetBtn.addEventListener("click", resetData);
+            }
+            const cancelResetBtn = document.getElementById("cancelResetBtn");
+            if (cancelResetBtn) {
+                cancelResetBtn.addEventListener("click", closeModal);
+            }
+            const clearSortBtn = document.getElementById("clearSortBtn");
+            if (clearSortBtn) {
+                clearSortBtn.addEventListener("click", clearSort);
+            }
+            const exportBtn = document.getElementById("exportExcelBtn");
+            if (exportBtn) {
+                exportBtn.addEventListener("click", exportExcel);
+            }
             renderChart();
         }
 
@@ -912,9 +1346,23 @@ DASHBOARD_TEMPLATE = """
                     });
                 });
             }
-            currentSortColumn = null;
-            currentSortDirection = "asc";
-            document.getElementById("sortStatus").textContent = "";
+            
+            // Re-apply sort if active, otherwise clear sort indicators
+            if (currentSortColumn) {
+                const th = document.querySelector(`th[data-column="${currentSortColumn}"]`);
+                if (th) {
+                    // Temporarily reset sort column to force re-sort in same direction
+                    const savedCol = currentSortColumn;
+                    const savedDir = currentSortDirection;
+                    currentSortColumn = null; 
+                    currentSortDirection = savedDir === "asc" ? "desc" : "asc"; // toggle logic in onHeaderClick
+                    onHeaderClick(savedCol, th);
+                }
+            } else {
+                document.getElementById("sortStatus").textContent = "";
+                const clearSortBtn = document.getElementById("clearSortBtn");
+                if (clearSortBtn) clearSortBtn.style.display = "none";
+            }
             renderRows();
             renderChart();
         }
@@ -1025,6 +1473,63 @@ DASHBOARD_TEMPLATE = """
             pdf.save("data-chart.pdf");
         }
 
+        function showToast(message, isError) {
+            let toast = document.getElementById("toast");
+            if (!toast) {
+                toast = document.createElement("div");
+                toast.id = "toast";
+                toast.className = "toast";
+                document.body.appendChild(toast);
+            }
+            toast.textContent = message;
+            if (isError) {
+                toast.classList.add("error");
+            } else {
+                toast.classList.remove("error");
+            }
+            toast.classList.add("visible");
+            setTimeout(function () {
+                toast.classList.remove("visible");
+            }, 4000);
+        }
+
+        async function exportExcel() {
+            const btn = document.getElementById("exportExcelBtn");
+            if (!btn) return;
+            if (!columns.length || !originalData.length) {
+                showToast("Tidak ada data untuk diexport.", true);
+                return;
+            }
+            const originalText = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = "Mengekspor...";
+            try {
+                const params = new URLSearchParams();
+                const term = document.getElementById("globalSearch").value;
+                if (term) params.append("q", term);
+                const response = await fetch("/export-to-excel?" + params.toString(), { method: "GET" });
+                if (!response.ok) {
+                    throw new Error("HTTP " + response.status);
+                }
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = "dashboard_export.xlsx";
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                window.URL.revokeObjectURL(url);
+                showToast("Export berhasil. File berhasil diunduh.", false);
+            } catch (error) {
+                console.error("Export error:", error);
+                showToast("Export gagal. Periksa log server.", true);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = originalText;
+            }
+        }
+
         function resetView() {
             const globalSearch = document.getElementById("globalSearch");
             if (globalSearch) globalSearch.value = "";
@@ -1112,6 +1617,7 @@ def login():
         expected_password = os.environ.get("DASHBOARD_PASSWORD", "admin123")
         if username == expected_user and password == expected_password:
             session["logged_in"] = True
+            session["username"] = username
             next_url = request.args.get("next") or url_for("dashboard")
             return redirect(next_url)
         error = "Username atau password salah."
@@ -1135,6 +1641,154 @@ def api_data():
             "rows": dataframe_to_json_rows(df),
         }
     )
+
+
+@app.route("/api/export-excel")
+@login_required
+def export_excel_api():
+    df = load_dataframe()
+    if df.empty:
+        return jsonify({"error": "No data available to export"}), 400
+    
+    df_export = df
+    
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df_export.to_excel(writer, sheet_name='Merged Data', index=False)
+        metadata = {
+            'Export Information': [
+                f'Export Date: {pd.Timestamp.now()}',
+                f'Total Rows Exported: {len(df_export)}',
+                f'Source: SQLite Database (records_current) or Merged Snapshot'
+            ]
+        }
+        pd.DataFrame(metadata).to_excel(writer, sheet_name='Metadata', index=False)
+    output.seek(0)
+    return send_file(
+        output,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        as_attachment=True,
+        download_name=f'merged_data_export_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
+    )
+
+
+@app.route("/export")
+@login_required
+def export_excel():
+    df = load_dataframe()
+    if df.empty:
+        return jsonify({"error": "No data to export"}), 404
+    
+    df_export = df
+    
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_export.to_excel(writer, index=False, sheet_name="Data")
+    output.seek(0)
+    filename = "dashboard_export_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".xlsx"
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.route("/export-to-excel", methods=["GET"])
+@login_required
+def export_to_excel():
+    if not can_export():
+        return jsonify({"error": "Not allowed to export"}), 403
+    df = load_dataframe()
+    if df.empty:
+        return jsonify({"error": "No data to export"}), 404
+    q = request.args.get("q", "").strip()
+    if q:
+        df = df[df.apply(lambda row: q.lower() in " ".join(row.astype(str)).lower(), axis=1)]
+    date_from = request.args.get("from")
+    date_to = request.args.get("to")
+    if "ExportTimestamp" in df.columns and (date_from or date_to):
+        df_ts = pd.to_datetime(df["ExportTimestamp"], errors="coerce")
+        if date_from:
+            df = df[df_ts >= pd.to_datetime(date_from, errors="coerce")]
+        if date_to:
+            df = df[df_ts <= pd.to_datetime(date_to, errors="coerce")]
+    page_size = int(request.args.get("page_size", "0") or "0")
+    page = int(request.args.get("page", "1") or "1")
+    if page_size > 0:
+        start = (page - 1) * page_size
+        end = start + page_size
+        df = df.iloc[start:end]
+    
+    df_export = df
+    
+    user_id = session.get("username") or "web"
+    # merge_to_dashboard_excel_web still needs 'df' with NOP for synchronization logic
+    dashboard_path, sync_results = merge_to_dashboard_excel_web(df, user_id)
+    
+    # Generate direct download from df_export (without metadata)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_export.to_excel(writer, index=False, sheet_name="Data")
+    output.seek(0)
+    
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name="dashboard_export.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.route("/api/data/reset", methods=["POST"])
+@login_required
+def reset_data():
+    conn = None
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        db_path = os.path.join(base_dir, "data_pipeline.sqlite")
+        export_path = os.path.join(base_dir, "export", "dashboard_export.xlsx")
+        merged_path = os.path.join(base_dir, "merged_current.xlsx")
+        
+        print(f"[web_app] Starting robust reset process", flush=True)
+        
+        # 1. Reset SQLite within a transaction
+        if os.path.exists(db_path):
+            conn = sqlite3.connect(db_path)
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                # Get table list to ensure we clean everything
+                cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                tables = [row[0] for row in cursor.fetchall() if row[0] != "sqlite_sequence"]
+                
+                for table in tables:
+                    print(f"[web_app] Clearing table: {table}", flush=True)
+                    conn.execute(f"DELETE FROM {table}")
+                
+                conn.commit()
+                print("[web_app] SQLite data cleared successfully", flush=True)
+            except Exception as db_e:
+                conn.rollback()
+                raise db_e
+            finally:
+                conn.close()
+            
+        # 2. Reset Excel Files (Move to backup instead of delete for safety, or just delete as requested)
+        for path in [export_path, merged_path]:
+            if os.path.exists(path):
+                try:
+                    # Optional: backup before delete
+                    backup_path = path + ".bak"
+                    shutil.copy2(path, backup_path)
+                    os.remove(path)
+                    print(f"[web_app] Removed file: {path}", flush=True)
+                except Exception as file_e:
+                    print(f"[web_app] Warning: Could not remove {path}: {file_e}", flush=True)
+            
+        return jsonify({"message": "Data berhasil direset secara menyeluruh"}), 200
+    except Exception as e:
+        print(f"[web_app] Reset error: {e}", flush=True)
+        return jsonify({"error": f"Gagal mereset data: {str(e)}"}), 500
 
 
 def main():

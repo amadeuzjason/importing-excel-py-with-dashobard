@@ -1,0 +1,34 @@
+2026-02-24 08:35:58,751 INFO Starting ingestion for file: path\to\hasil_ekspor.xlsx
+2026-02-24 08:36:51,413 INFO Starting ingestion for file: path\to\dashboard_export.xlsx
+2026-02-24 08:43:10,151 INFO Starting ingestion for file: d:\12\test-excel-py\large_sample_data_program.xlsx
+2026-02-24 08:43:10,369 INFO Ingestion summary: new=50, updated=0, unchanged=0
+2026-02-24 08:43:10,418 INFO Merged snapshot exported: D:\12\test-excel-py\merged_current.xlsx (rows=50)
+2026-02-24 08:43:10,418 INFO Processing finished successfully
+2026-02-24 08:43:19,870 INFO Starting ingestion for file: d:\12\test-excel-py\large_sample_data_program_v2.xlsx
+2026-02-24 08:43:20,079 INFO Ingestion summary: new=50, updated=0, unchanged=0
+2026-02-24 08:43:20,150 INFO Merged snapshot exported: D:\12\test-excel-py\merged_current.xlsx (rows=100)
+2026-02-24 08:43:20,150 INFO Processing finished successfully
+2026-02-24 08:56:04,884 INFO Starting ingestion for file: D:\12\test-excel-py\large_sample_data_program.xlsx
+2026-02-24 08:56:05,387 INFO Ingestion summary: new=50, updated=0, unchanged=0
+2026-02-24 08:56:05,437 INFO Merged snapshot exported: D:\12\test-excel-py\merged_current.xlsx (rows=50)
+2026-02-24 08:56:05,438 INFO Processing finished successfully
+2026-02-24 08:56:05,473 INFO Starting ingestion for file: D:\12\test-excel-py\large_sample_data_program_v2.xlsx
+2026-02-24 08:56:05,560 INFO Ingestion summary: new=50, updated=0, unchanged=0
+2026-02-24 08:56:05,614 INFO Merged snapshot exported: D:\12\test-excel-py\merged_current.xlsx (rows=100)
+2026-02-24 08:56:05,614 INFO Processing finished successfully
+2026-02-24 09:08:11,200 INFO Starting ingestion for file: D:\12\test-excel-py\large_sample_data_program.xlsx
+2026-02-24 09:08:11,413 INFO Ingestion summary: new=0, updated=0, unchanged=50
+2026-02-24 09:08:11,549 INFO Merged snapshot exported: D:\12\test-excel-py\merged_current.xlsx (rows=320)
+2026-02-24 09:08:11,549 INFO Processing finished successfully
+2026-02-24 09:08:11,551 INFO Starting ingestion for file: D:\12\test-excel-py\large_sample_data_program_v2.xlsx
+2026-02-24 09:08:11,580 INFO Ingestion summary: new=0, updated=0, unchanged=50
+2026-02-24 09:08:11,718 INFO Merged snapshot exported: D:\12\test-excel-py\merged_current.xlsx (rows=320)
+2026-02-24 09:08:11,719 INFO Processing finished successfully
+2026-02-24 09:36:35,424 INFO Starting ingestion for file: D:\12\test-excel-py\large_sample_data_program.xlsx
+2026-02-24 09:36:35,645 INFO Ingestion summary: new=0, updated=0, unchanged=50
+2026-02-24 09:36:35,762 INFO Merged snapshot exported: D:\12\test-excel-py\merged_current.xlsx (rows=320)
+2026-02-24 09:36:35,763 INFO Processing finished successfully
+2026-02-24 09:36:35,765 INFO Starting ingestion for file: D:\12\test-excel-py\large_sample_data_program_v2.xlsx
+2026-02-24 09:36:35,795 INFO Ingestion summary: new=0, updated=0, unchanged=50
+2026-02-24 09:36:35,926 INFO Merged snapshot exported: D:\12\test-excel-py\merged_current.xlsx (rows=320)
+2026-02-24 09:36:35,927 INFO Processing finished successfully

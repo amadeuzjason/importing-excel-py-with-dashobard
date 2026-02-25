@@ -10,6 +10,11 @@ import logging
 import subprocess
 import sys
 import webbrowser
+import shutil
+try:
+    import process_export
+except Exception:
+    process_export = None
 
 # Setup logging
 logging.basicConfig(level=logging.DEBUG, 
@@ -346,44 +351,39 @@ class ExcelImporterApp:
     def export_data(self):
         if self.df is None:
             return
-        
-        # Get the data to export (filtered or original)
         data_to_export = self.filtered_df if self.filtered_df is not None else self.df
-        
         if data_to_export.empty:
             messagebox.showinfo("Info", "No data to export")
             return
-        
-        # Apply current sort order if any
         if self.current_sort_column and self.current_sort_column in data_to_export.columns:
             data_to_export = data_to_export.sort_values(
-                by=self.current_sort_column, 
+                by=self.current_sort_column,
                 ascending=(self.current_sort_order == 'asc')
             )
-        
         file_path = filedialog.asksaveasfilename(
             defaultextension=".xlsx",
             filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
             title="Save Export File"
         )
-        
         if not file_path:
             return
-        
         try:
-            # Export dengan metadata ke lokasi yang dipilih user
             self._write_excel_with_metadata(data_to_export, file_path)
-
-            # Selain itu, simpan juga ke file tetap untuk dashboard web
-            dashboard_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard_export.xlsx")
-            self._write_excel_with_metadata(data_to_export, dashboard_path)
-            logging.info(f"Dashboard export written to: {dashboard_path}")
-            
+            self.merge_to_dashboard_excel(data_to_export)
+            merged_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "merged_current.xlsx")
+            if process_export is not None:
+                try:
+                    process_export.process(file_path)
+                    logging.info(f"Merge pipeline updated from: {file_path}")
+                except Exception as e:
+                    logging.error(f"Merge pipeline failed: {e}")
+            else:
+                logging.warning("process_export module not available, skipping merge pipeline")
             messagebox.showinfo("Success", f"Data exported successfully to {file_path}\n\nRows exported: {len(data_to_export)}\nSort: {self.current_sort_column or 'None'} {self.current_sort_order or ''}\nFilter: {self.filter_column_var.get() or 'None'} = {self.filter_value_var.get() or 'None'}")
             self.status_var.set(f"Data exported: {len(data_to_export)} rows with current sort/filter")
-            # Jalankan / buka dashboard menggunakan file tetap
-            self.launch_web_dashboard(dashboard_path)
-            
+            dashboard_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard_export.xlsx")
+            target_path = merged_path if os.path.exists(merged_path) else dashboard_path
+            self.launch_web_dashboard(target_path)
         except Exception as e:
             messagebox.showerror("Error", f"Export failed: {str(e)}")
             print(f"Export error details: {e}")
@@ -391,7 +391,6 @@ class ExcelImporterApp:
     def _write_excel_with_metadata(self, df_to_save, path):
         with pd.ExcelWriter(path, engine='openpyxl') as writer:
             df_to_save.to_excel(writer, sheet_name='Data', index=False)
-            
             metadata = {
                 'Export Information': [
                     f'Export Date: {pd.Timestamp.now()}',
@@ -404,6 +403,95 @@ class ExcelImporterApp:
                 ]
             }
             pd.DataFrame(metadata).to_excel(writer, sheet_name='Metadata', index=False)
+    
+    def merge_to_dashboard_excel(self, df_new):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        export_dir = os.path.join(base_dir, "export")
+        backup_dir = os.path.join(export_dir, "backup")
+        
+        # Ensure target directories exist
+        os.makedirs(backup_dir, exist_ok=True)
+        
+        dashboard_path = os.path.join(export_dir, "dashboard_export.xlsx")
+        
+        if df_new is None or df_new.empty:
+            logging.info("merge_to_dashboard_excel: no data to merge")
+            return
+        
+        df_new = df_new.copy()
+        ts = datetime.utcnow().isoformat()
+        user_id = os.environ.get("EXPORT_USER") or os.environ.get("USERNAME") or "desktop"
+        
+        # SYNC ENGINE INTEGRATION
+        sync_results = None
+        if process_export is not None:
+            try:
+                conn = process_export.connect_db()
+                # Ensure schema is up to date
+                process_export.ensure_schema(conn, list(df_new.columns))
+                
+                # Perform field-level synchronization
+                sync_results = process_export.detect_and_sync_changes(conn, df_new, source_file=getattr(self, "current_file", "desktop"))
+                conn.close()
+                
+                # Show notification if modifications occurred
+                if sync_results["modifications"]:
+                    change_count = len(sync_results["modifications"])
+                    msg = f"SYNC ALERT: {change_count} field modifications detected and synchronized.\n\n"
+                    for mod in sync_results["modifications"][:5]: # Show first 5
+                        msg += f"- [{mod['nop']}] {mod['field']}: {mod['old']} -> {mod['new']}\n"
+                    if change_count > 5:
+                        msg += f"... and {change_count - 5} more."
+                    
+                    messagebox.showwarning("Data Sync Alert", msg)
+                    logging.info(f"SYNC: {change_count} modifications detected during export.")
+                
+                # If everything was a duplicate/unchanged and nothing new was added, we can stop or continue to update Excel
+                if sync_results["new_records"] == 0 and sync_results["updated_records"] == 0:
+                    logging.info("SYNC: No new or updated records to sync to Excel.")
+            except Exception as e:
+                logging.error(f"Sync Engine failed: {e}")
+                messagebox.showerror("Sync Error", f"Automated synchronization failed: {e}")
+
+        # Update the physical Excel file for dashboard fallback
+        if os.path.exists(dashboard_path):
+            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            backup_filename = f"dashboard_export_backup_{timestamp}.xlsx"
+            backup_path = os.path.join(backup_dir, backup_filename)
+            
+            try:
+                shutil.copy2(dashboard_path, backup_path)
+            except Exception as e:
+                logging.error(f"Failed to create backup: {e}")
+            
+            try:
+                # Load latest data from DB if sync was successful, otherwise fallback to Excel merge
+                if sync_results:
+                    conn = process_export.connect_db()
+                    combined = process_export.load_current(conn)
+                    conn.close()
+                else:
+                    excel_obj = pd.read_excel(dashboard_path, sheet_name=None)
+                    df_old = excel_obj.get("Data", next(iter(excel_obj.values()))) if isinstance(excel_obj, dict) else excel_obj
+                    combined = pd.concat([df_old, df_new], ignore_index=True).drop_duplicates(subset=["NOP"], keep="last")
+            except Exception as e:
+                logging.error(f"Error reading existing dashboard file: {e}")
+                combined = df_new
+        else:
+            combined = df_new
+            
+        try:
+            with pd.ExcelWriter(dashboard_path, engine="openpyxl") as writer:
+                combined.to_excel(writer, index=False, sheet_name="Data")
+            
+            logging.info(f"Dashboard export updated: {dashboard_path}")
+            if not sync_results or (sync_results["new_records"] > 0 or sync_results["updated_records"] > 0):
+                messagebox.showinfo("Export Berhasil", f"Data berhasil diexport dan disinkronisasi.\nTotal data sekarang: {len(combined)}")
+        except Exception as e:
+            logging.error(f"Failed to save dashboard export: {e}")
+            messagebox.showerror("Error Export", f"Gagal menyimpan file export: {e}")
+
+
     
     def launch_web_dashboard(self, export_path):
         try:

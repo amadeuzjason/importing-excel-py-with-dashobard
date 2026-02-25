@@ -96,7 +96,32 @@ python excel_importer.py
 - Untuk file >100MB, pastikan RAM cukup
 - Progress bar membantu memantau progres loading
 
-## 🎯 Tips Penggunaan
+### 🎯 Tips Penggunaan
+- Gunakan pencarian global untuk menemukan data dengan cepat di semua kolom.
+- Manfaatkan fitur **Reset Data** di dashboard web untuk membersihkan seluruh data riwayat export jika diperlukan.
+- Tombol **Clear Sorting (X)** di dashboard web memudahkan pengembalian urutan data ke posisi semula tanpa harus me-reload halaman.
+
+## 📝 Changelog
+
+### v4.0.0 (2026-02-25)
+- **Perbaikan Display Incremental**: Memperbaiki masalah nilai `INCREMENTAL 1` yang tidak muncul dengan mekanisme *intelligent column mapping* (merename `REVENUE INCREMENTAL 1` dan melakukan *merge data* jika kedua kolom ada).
+- **Penghapusan Kolom Actual**: Menghapus secara permanen kolom `REVENUE (ACTUAL)` dari sistem (database ingestion dan tampilan dashboard) untuk standarisasi data.
+- **Revamp Reset Data**: Memperbarui fungsi reset data dengan sistem transaksi SQLite (rollback jika gagal), pembersihan seluruh file residual (`merged_current.xlsx`), dan backup otomatis file excel sebelum dihapus.
+- **Robust Error Handling**: Peningkatan logging pada level backend (`web_app.py`) dan pipeline (`process_export.py`) untuk pelacakan alur data yang lebih akurat.
+- **Unit Testing v4**: Menambahkan integrasi test untuk memverifikasi pembersihan kolom dan konsistensi data setelah proses reset.
+
+### v3.0.0 (2026-02-25)
+- **Fitur Reset Data**: Menambahkan tombol "Reset Data" (ikon trash) di dashboard web untuk menghapus seluruh data permanen (SQLite & Excel) dengan konfirmasi keamanan.
+- **Clear Sorting**: Menambahkan tombol "X" kecil di samping label sort pada dashboard web untuk menghapus pengurutan aktif.
+- **Standarisasi Kolom**: 
+  - Menghapus kolom "Revenue Incremental 1".
+  - Menggantinya dengan kolom "Incremental 1" (tanpa prefix "Revenue").
+  - Menyesuaikan urutan kolom tabel sesuai standar anggaran program (NOP, PROGRAM, ..., INCREMENTAL 1, 2, 3, STATUS, dsb).
+- **Perbaikan Backend**: 
+  - Update `process_export.py` untuk mendukung skema kolom baru.
+  - Update `web_app.py` untuk merename dan mengurutkan kolom secara otomatis saat data dimuat.
+- **Unit Testing**: Menambahkan `tests/test_dashboard_v3.py` untuk memverifikasi fungsi reset data dan penggantian nama kolom.
+- **UI/UX**: Peningkatan responsivitas dashboard untuk perangkat mobile dan penambahan hover effects pada tombol-tombol baru.
 
 ### Performa Optimal
 - Tutup aplikasi lain saat memproses file besar
