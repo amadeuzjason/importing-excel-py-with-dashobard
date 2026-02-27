@@ -1,0 +1,12 @@
+2026-02-26 08:06:17,062 - INFO - Dashboard export updated: D:\12\test-excel-py\export\dashboard_export.xlsx
+2026-02-26 08:06:20,569 - INFO - Starting ingestion for file: D:/12/test-data-excel/testing.xlsx
+2026-02-26 08:06:20,599 - INFO - Ingestion summary: new=0, updated=0, unchanged=2
+2026-02-26 08:06:20,663 - INFO - Merged snapshot exported: D:\12\test-excel-py\merged_current.xlsx (rows=102)
+2026-02-26 08:06:20,663 - INFO - Processing finished successfully
+2026-02-26 08:06:20,663 - INFO - Merge pipeline updated from: D:/12/test-data-excel/testing.xlsx
+2026-02-26 08:11:30,211 - INFO - Dashboard export updated: D:\12\test-excel-py\export\dashboard_export.xlsx
+2026-02-26 08:11:37,041 - INFO - Starting ingestion for file: D:/12/test-data-excel/test.xlsx
+2026-02-26 08:11:37,078 - INFO - Ingestion summary: new=0, updated=0, unchanged=2
+2026-02-26 08:11:37,140 - INFO - Merged snapshot exported: D:\12\test-excel-py\merged_current.xlsx (rows=104)
+2026-02-26 08:11:37,140 - INFO - Processing finished successfully
+2026-02-26 08:11:37,141 - INFO - Merge pipeline updated from: D:/12/test-data-excel/test.xlsx
